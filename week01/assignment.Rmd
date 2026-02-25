@@ -1,0 +1,28 @@
+---
+title: "Assignment 1"
+author: "Dea Karam"
+date: "2026-02-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, echo = TRUE)
+```
+
+### Library Loading
+
+In the following code chunk I will be loading the epiwraps library:
+
+```{r library}
+library(epiwraps)
+```
+
+### Printing session info
+
+I am then going to print the session info:
+
+```{r SessionInfo}
+sessionInfo()
+```
+
+Thank you! :)
