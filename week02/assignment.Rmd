@@ -1,0 +1,136 @@
+---
+title: "Assignment 2"
+author: "Dea Karam"
+date: "2026-03-03"
+output: 
+  html_document:
+    toc: True
+    toc_depth: 3
+    theme: cosmo
+    number_sections: True
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+In this assignment, we explore the use of Bioconductor’s `AnnotationHub` and `ensembldb` packages to retrieve and analyze genomic annotation and sequence data. Specifically, we obtain gene annotation data for *Mus musculus* (Ensembl version 102, genome build GRCm38) and genome sequence files in TwoBit (dna_sm) format for both mouse and *Drosophila melanogaster* (BDGP6).
+
+Using these resources, we focus on protein-coding genes to (1) determine the number of unique Ensembl gene IDs and gene symbols, and (2) compute and visualize the distribution of spliced transcript lengths, defined as the total length of exonic regions excluding introns.
+
+
+
+
+## Setup
+
+As a first step in the analysis, load the required Bioconductor packages.
+
+```{r, warning = FALSE}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(ensembldb)
+  library(GenomicRanges)
+  library(dplyr)
+})
+```
+
+## Downloading Required Resources
+
+Query the AnnotationHub database three times.
+
+We retrieve:
+
+#### Mouse EnsDb (Ensembl v102, GRCm38)
+
+```{r}
+ah <- AnnotationHub()
+mouse_query <- query(ah, c("Mus musculus","EnsDb",  "v102", "GRCm38"))
+mouse_query
+```
+
+From the output of the previous cell, we notice that the EnsDb object retrieved for **Mus Musculus**, version **102**, and genome build **GRCm38** is `AH89211`.
+
+```{r}
+mouse_ensdb <- ah[["AH89211"]] # load the EnsDb object
+```
+
+#### Mouse genome sequence (dna_sm, GRCm38)
+
+```{r}
+mouse_query <- query(ah, c("Mus Musculus", "TwoBit", "GRCm38", "dna_sm" )) 
+
+# mcols(mouse_query)[, c("title", "species", "genome", "rdatadateadded", "rdataclass")]
+
+mouse_genome_id <- rev(mouse_query$ah_id)[1] # reverse the ordering from latest to oldest and choose the latest entry
+
+mouse_genome <- ah[[mouse_genome_id]] # load the retrieved mouse genome
+
+```
+
+#### Drosophila genome sequence (dna_sm, BDGP6)
+
+```{r}
+drosophila_query <- query(ah, c("Drosophila", "TwoBit", "BDGP6", "dna_sm"))
+
+# mcols(drosophila_query)[, c("title", "species", "genome", "rdatadateadded", "rdataclass")]
+
+drosophila_genome_id <- rev(drosophila_query$ah_id)[1] # reverse the ordering from latest to oldest and choose the latest entry
+
+drosophila_genome <- ah[[drosophila_genome_id]] # # load the retrieved drosophila genome
+```
+
+## Protein-Coding Genes
+
+In this section, we extract protein-coding genes from the EnsDb mouse object and count the number of unique gene IDs and symbols.
+
+```{r}
+mouse_genes <- genes(mouse_ensdb) # extract genes from the mouse EnsDb object 
+
+mouse_genes_pcg <- mouse_genes[which(mouse_genes$gene_biotype == "protein_coding")] #select for protein-coding genes
+
+n_gene_ids <- length(unique(mouse_genes_pcg$gene_id))
+n_gene_symbols <- length(unique(mouse_genes_pcg$symbol))
+
+cat("Number of unique mouse gene IDs:", n_gene_ids, "\n")
+cat("Number of unique mouse gene symbols:", n_gene_symbols, "\n")
+```
+
+## Spliced Transcript Lengths
+
+
+To compute the spliced (intron-excluded) length of protein-coding transcripts, we first restrict the analysis to exons belonging to protein-coding transcripts. We then group these exons by transcript and sum their widths to obtain the total spliced length for each transcript.
+
+```{r}
+mouse_exons <- exonsBy(mouse_ensdb, filter = TxBiotypeFilter("protein_coding"))
+
+mouse_txs_lens <- sum(width(mouse_exons))
+
+```
+
+## Plotting Transcipt Length Distribution
+
+```{r}
+
+hist(mouse_txs_lens,
+     breaks = 100,
+     main = "Distribution of spliced transcript lengths",
+     xlab = "Spliced transcript length (bp)",
+     col = "steelblue")
+```
+
+
+The distribution of spliced transcript lengths is strongly right-skewed, with most protein-coding transcripts being relatively short and a smaller number exhibiting substantially larger lengths.
+
+
+```{r}
+hist(log10(mouse_txs_lens),
+     breaks = 100,
+     main = "Distribution of log10 spliced transcript lengths",
+     xlab = "Log10 spliced transcript length (bp)",
+     col = "steelblue")
+```
+
+On the log scale, the distribution appears more symmetric, but still demonstrates substantial variability in transcript length. This highlights the wide range of exon compositions among protein-coding transcripts.
+
+***Thank you!***
