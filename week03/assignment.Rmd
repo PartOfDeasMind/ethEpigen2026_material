@@ -1,0 +1,208 @@
+---
+title: "Assignment3"
+author: "Dea Karam"
+date: "2026-03-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Loading Required Packages
+
+We begin by loading the Bioconductor and R packages required for this analysis.
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(Rsubread)      # read alignment
+  library(rtracklayer)   # read/write genomic file formats
+  library(Biostrings)    # handling sequences
+  library(Rfastp)        # read QC/trimming
+  library(epiwraps)
+  library(MACSr)
+  library(ensembldb)
+  library(GenomicRanges)
+})
+
+ah <- AnnotationHub()
+```
+
+# 2. Downloading the raw sequencing reads
+
+The raw sequencing reads used in this analysis are obtained from the ENCODE project.  
+The FASTQ file containing CTCF ChIP-seq reads is downloaded directly and stored locally.
+
+```{r, eval=FALSE}
+options(timeout=3600)
+dir.create("raw")
+download.file("https://www.encodeproject.org/files/ENCFF127RRR/@@download/ENCFF127RRR.fastq.gz", "raw/ctcf.fastq.gz", mode="wb") # wb -> write binary. .gz is a compressed binary file.
+
+```
+
+# 3. Reads QC and trimming
+
+
+Before alignment, sequencing reads are evaluated and processed using **Rfastp**, which performs quality control and optional trimming.  
+The processed reads are written to a new directory so that downstream analyses use the cleaned dataset.
+
+```{r}
+dir.create("rfastp.trimmed", showWarnings = FALSE)
+
+qc <- Rfastp::rfastp("raw/ctcf.fastq.gz", thread = 4, overrepresentationAnalysis = TRUE, outputFastq = "rfastp.trimmed/ctcf")
+```
+
+To evaluate the nucleotide composition across sequencing cycles, we visualize the base content before and after quality control.
+
+
+```{r}
+Rfastp::curvePlot(qc, curve="content_curves")
+```
+
+The nucleotide composition remains relatively stable across read positions before and after QC, indicating no strong sequence bias in the reads.
+
+```{r}
+Rfastp::curvePlot(qc, curve = "quality_curves")
+```
+
+As typical of sequencing data, base quality scores gradually decrease toward the end of reads.
+
+QC processing does not substantially alter the overall quality profile.
+
+# 4. Alignment
+## 4.1 Downloading reference genome
+
+To align the sequencing reads, we download the **Drosophila melanogaster reference genome (dm6 / BDGP6)** using AnnotationHub.  
+
+The genome sequence is exported locally in FASTA format for index construction and downstream alignment.
+```{r}
+genome <- ah[["AH49674"]]   
+dir.create("BDGP6_genome", showWarnings = FALSE)
+export( import.2bit(genome), "BDGP6_genome/genome.fasta.gz", compress = TRUE)
+```
+
+## 4.2 Read alignment 
+
+The processed reads were aligned to the *Drosophila melanogaster* reference genome (BDGP6) using the **Rsubread** aligner.
+
+The resulting alignments were saved in BAM format for downstream analysis.
+```{r, eval=FALSE}
+Rsubread::buildindex( basename = "BDGP6_genome/rsubread", reference = "BDGP6_genome/genome.fasta.gz"
+)
+```
+```{r}
+dir.create("aligned", showWarnings = FALSE)
+
+align.stats <- Rsubread::align(
+  index = "BDGP6_genome/rsubread",
+  type = "dna",
+  readfile1 = "rfastp.trimmed/ctcf_R1.fastq.gz",
+  output_file = "aligned/ctcf.bam",
+  nthreads = 6,
+  sortReadsByCoordinates = TRUE
+)
+
+align.stats
+```
+
+## 4.3 Alignment statitstics
+
+To evaluate alignment performance, we extracted basic mapping statistics including the total number of reads, mapped reads, and the overall mapping percentage.
+
+```{r}
+total_reads <- align.stats["Total_reads", 1]
+mapped_reads <- align.stats["Mapped_reads", 1]
+mapping_pct <- 100 * mapped_reads / total_reads
+```
+
+```{r}
+cat("Total reads:", total_reads, "\n")
+cat("Mapped reads:", mapped_reads, "\n")
+cat("Mapped percentage:", round(mapping_pct, 2), "%\n")
+```
+
+Approximately **91.8% of reads successfully mapped to the reference genome**, indicating good alignment quality.
+
+# 5. Peak Calling
+
+To identify genomic regions enriched for CTCF binding, peaks were called using **MACS3**.  
+The algorithm detects statistically significant regions of read enrichment and outputs peak coordinates.
+
+```{r}
+system('wsl bash -lc "cd \"/mnt/c/Users/deaka/OneDrive/Desktop/ETHZ/Sem2/Epigenetics/Assignments/A3\" && mkdir -p peaks && ~/macs3env/bin/macs3 callpeak --outdir peaks -n ctcf --gsize dm -t aligned/ctcf.bam"')
+```
+
+The peak regions identified by MACS3 were imported into R using **rtracklayer**.  
+
+We then counted the total number of detected peaks to summarize the binding landscape of CTCF in this dataset.
+```{r}
+peaks <- rtracklayer::import("peaks/ctcf_peaks.narrowPeak")
+n_peaks <- length(peaks)
+cat("Number of peaks:", n_peaks, "\n")
+```
+
+This number represents the genomic regions where significant CTCF enrichment was detected in the ChIP-seq experiment.
+
+# 6. Finding a peak inside a gene
+
+## 6.1 Get the genes 
+
+To identify peaks located inside genes, gene annotations for *Drosophila melanogaster* were retrieved from Ensembl using AnnotationHub.
+
+```{r}
+drosophila_query <- query(ah, c("Drosophila melanogaster", "EnsDb"))
+# mcols(drosophila_query)[, c("title", "species", "genome", "rdatadateadded", "rdataclass")]
+drosophila_ensdb_id <- rev(drosophila_query$ah_id)[1]
+ensdb <- ah[[drosophila_ensdb_id]]
+dr_genes <- genes(ensdb)
+```
+
+Next, overlaps between the detected peaks and annotated genes were computed to identify peaks located within genes.
+
+```{r}
+# peaks <- rtracklayer::import("peaks/ctcf_peaks.narrowPeak")
+hits <- findOverlaps(peaks, dr_genes)
+length(hits)
+```
+
+One peak overlapping a gene was selected for visualization.
+
+```{r}
+peaks_in_genes <- peaks[queryHits(hits)]
+peak_in_gene <- peaks_in_genes[1]
+peak_in_gene
+```
+
+```{r}
+gene_hit <- dr_genes[subjectHits(hits)[1]]
+gene_name <- gene_hit$gene_name
+```
+
+The ChIP-seq signal surrounding this intragenic peak was then visualized.
+
+```{r}
+plotSignalTracks(
+  list(coverage = "aligned/ctcf.bam", peaks = peaks),
+  region = peak_in_gene,
+  extend = 500,
+  main = paste("CTCF peak inside gene:", gene_name)
+)
+```
+
+A peak overlapping the gene SteXh.CG42398 was selected using genomic overlap analysis, and the ChIP-seq signal was visualized around this intragenic peak.
+
+
+
+# Extra
+Checking how many peaks overlap the selected gene.
+
+```{r}
+hits_df <- data.frame(
+  peak_idx = queryHits(hits),
+  gene_idx = subjectHits(hits),
+  gene_name = dr_genes$gene_name[subjectHits(hits)]
+)
+
+hits_df[hits_df$gene_name == gene_name, ]
+```
