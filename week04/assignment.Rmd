@@ -1,0 +1,221 @@
+---
+title: "Assignment 4"
+author: "Dea Karam"
+date: "2026-03-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Importing Required Packages
+
+```{r}
+suppressPackageStartupMessages({
+  library(R.utils)
+  library(AnnotationHub)
+  library(ensembldb)
+  library(GenomicRanges)
+  library(rtracklayer)
+  library(GenomeInfoDb)
+  library(epiwraps)
+  library(ggplot2)
+  library(GenomeInfoDb)
+  library(ggplot2)
+  library(VennDiagram)
+})
+ah <- AnnotationHub()
+```
+
+# Downloading The Data
+The datasets used in this analysis were obtained from the ENCODE project and consist of ChIP-seq experiments performed in mouse (Mus musculus). The first dataset corresponds to H3K27me3, H3K27me3, and p300 ChIP-seq in embryonic stem cells (mESC, Bruce4 cell line. The second dataset corresponds to H3K27me3, H3K27me3, and p300 ChIP-seq in adult mouse heart tissue (2 months). Both datasets use as a reference the mouse mm10 genome (GRCm38).
+
+
+```{r, eval=FALSE}
+## First Dataset
+download.file("https://www.encodeproject.org/files/ENCFF558YNC/@@download/ENCFF558YNC.bed.gz", "mESC_H3K27me3.bed.gz")
+gunzip("mESC_H3K27me3.bed.gz")
+
+download.file("https://www.encodeproject.org/files/ENCFF350GCX/@@download/ENCFF350GCX.bed.gz", "mESC_p300.bed.gz")
+gunzip("mESC_p300.bed.gz")
+
+download.file("https://www.encodeproject.org/files/ENCFF360VIS/@@download/ENCFF360VIS.bed.gz", "mESC_H3K27ac.bed.gz")
+gunzip("mESC_H3K27ac.bed.gz")
+
+
+## Second Dataset
+download.file("https://www.encodeproject.org/files/ENCFF887SZF/@@download/ENCFF887SZF.bed.gz", "mheart_H3K27me3.bed.gz")
+gunzip("mheart_H3K27me3.bed.gz")
+
+download.file("https://www.encodeproject.org/files/ENCFF733HUI/@@download/ENCFF733HUI.bed.gz", "mheart_H3K27ac.bed.gz")
+gunzip("mheart_H3K27ac.bed.gz")
+
+download.file("https://www.encodeproject.org/files/ENCFF318IYB/@@download/ENCFF318IYB.bed.gz", "mheart_p300.bed.gz")
+gunzip("mheart_p300.bed.gz")
+```
+
+
+
+```{r}
+
+# Create a peaks folder
+if (!dir.exists("peaks")){
+  dir.create("peaks")
+  files <- list.files(pattern = "\\.bed$", full.names = TRUE)
+
+  # Move each file into the peaks folder
+  for (f in files) {
+    file.rename(f, file.path("peaks", f))
+  }
+} 
+
+```
+
+```{r}
+files_mesc <- list.files("peaks", pattern = "^mESC.*\\.bed$", full.names = TRUE)
+files_mheart <- list.files("peaks", pattern = "^mheart.*\\.bed$", full.names = TRUE)
+
+names(files_mesc) <- gsub("\\.bed","",basename(files_mesc))
+names(files_mheart) <- gsub("\\.bed", "", basename(files_mheart))
+```
+
+```{r}
+peaks_mesc <- lapply(files_mesc, rtracklayer::import, format = "narrowPeak")
+peaks_mheart <- lapply(files_mheart, rtracklayer::import, format = "narrowPeak")
+```
+
+```{r}
+ah_query <- query(ah, c("Mus musculus", "EnsDb" , "GRCm38"))
+ensdb_id <- rev(ah_query$ah_id)[1]
+ensdb <- ah[[ensdb_id]]
+ensdb
+```
+
+# Finding Transcription Start Sites (TSS)
+
+```{r}
+tss_tr <- transcripts(ensdb, columns = c("tx_id", "gene_id"))
+tss <- promoters(tss_tr, upstream = 0, downstream = 1)
+```
+
+```{r}
+seqlevelsStyle(tss) <- "UCSC"
+main_chrs <- paste0("chr", c(1:19, "X", "Y"))
+tss <- keepSeqlevels(tss, main_chrs, pruning.mode = "coarse")
+```
+
+# Task1:
+
+### Finding overlaps between TSS and H3K27me3, H3K27ac or both between mESC and heart tissues.
+
+```{r}
+tss_overlaps <- function(tss, peaks){
+  total_tss <- length(tss)
+  overlaps <- overlapsAny(tss, peaks)
+  overlaps_prop <- sum(overlaps)/total_tss
+  
+  return(overlaps_prop)
+}
+```
+
+```{r}
+ov_mESC_H3K27ac <- tss_overlaps(tss, peaks_mesc$mESC_H3K27ac)
+ov_mESC_H3K27me3 <- tss_overlaps(tss, peaks_mesc$mESC_H3K27me3)
+
+ov_mheart_H3K27ac <- tss_overlaps(tss, peaks_mheart$mheart_H3K27ac)
+ov_mheart_H3K27me3 <- tss_overlaps(tss, peaks_mheart$mheart_H3K27me3)
+
+
+both_mESC <- sum(overlapsAny(tss, peaks_mesc$mESC_H3K27ac) &
+                 overlapsAny(tss, peaks_mesc$mESC_H3K27me3)) / length(tss)
+
+both_heart <- sum(overlapsAny(tss, peaks_mheart$mheart_H3K27ac) &
+                  overlapsAny(tss, peaks_mheart$mheart_H3K27me3)) / length(tss)
+```
+
+```{r}
+cat("The proportion of TSS overlapping H3K27ac in mESC is:", ov_mESC_H3K27ac, "\n")
+cat("The proportion of TSS overlapping H3K27me3 in mESC is:", ov_mESC_H3K27me3, "\n")
+cat("The proportion of TSS overlapping H3K27ac in heart is:", ov_mheart_H3K27ac, "\n")
+cat("The proportion of TSS overlapping H3K27me3 in heart is:", ov_mheart_H3K27me3, "\n")
+
+cat("The proportion of TSS overlapping both H3K27me3 and H3K27ac in mESC is:", both_mESC, "\n")
+cat("The proportion of TSS overlapping both H3K27me3 and H3K27ac in heart is:", both_heart, "\n")
+```
+
+```{r}
+df_props <- data.frame(
+  tissue = rep(c("mESC", "heart"), each = 3),
+  mark   = rep(c("H3K27ac", "H3K27me3", "both"), 2),
+  proportion = c(ov_mESC_H3K27ac, ov_mESC_H3K27me3, both_mESC,
+                 ov_mheart_H3K27ac, ov_mheart_H3K27me3, both_heart)
+)
+```
+
+```{r}
+ggplot(df_props, aes(x = mark, y = proportion, fill = tissue)) +
+  geom_col(position = position_dodge(0.9)) +
+  scale_fill_manual(values = c("mESC" = "#1f77b4", "heart" = "#ff7f0e")) +
+  labs(title = "Proportion of TSS overlapping histone marks",
+       x = "Mark", y = "Proportion of TSS") +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+
+What we can see from the bar plot is that the proportion of H3K27ac at TSS is higher in the differentiated heart tissue than in the embryonic stem cells and overall higher in both tissues compared to H3K27me3.
+
+Most importantly, we can see that the overlap of both histone marks at TSS is near zero for both tissues. This closely follows what we already know from biology that H3K27ac is a marker of active TSS while H3K27me3 is a marker of repressed elements and that both are mutually exclusive. A single Lysine (K) cannot be both trimethylated and acetylated.
+
+# Task2
+
+### Finding the relationship between the 3 signals (p300, H3K27ac, and H3K27me3) in both tissues
+
+```{r}
+regionOverlaps(peaks_mesc)
+```
+
+```{r}
+tmp <- regionsToUpset(peaks_mesc, nsets=length(peaks_mesc))
+UpSet(make_comb_mat(tmp))
+```
+
+```{r}
+regionOverlaps(peaks_mheart)
+```
+
+```{r}
+tmp <- regionsToUpset(peaks_mheart, nsets=length(peaks_heart))
+UpSet(make_comb_mat(tmp))
+```
+
+
+We can see the same pattern between both tissues. According to the plots, the proportion of the overlap of all 3 markers, the overlap between H3K27me3 and H3K27ac, or the overlap between p300 and H3K27me3 is very small. On the other hand, the proportion of TSS that overlap both H3K27ac and p300 peaks is much higher.  This builds on top of our previous analysis showing the mutual exclusivity of H3K27me3 and H3K27ac, and further indicates that p300 co-localizes with H3K27ac at active regulatory regions, while H3K27me3 marks a distinct, repressive chromatin state that does not overlap with active marks.
+
+# Task3
+## Finding the relationship between regulatory elements active in mESC and in the heart
+### p300
+```{r}
+p300_list <- list(mESC_p300 = peaks_mesc$mESC_p300, mheart_p300 = peaks_mheart$mheart_p300)
+tmp <- regionsToUpset(p300_list, nsets=length(p300_list))
+UpSet(make_comb_mat(tmp))
+```
+### H3K27ac
+```{r}
+H3K27ac_list <- list(mESC_H3K27ac = peaks_mesc$mESC_H3K27ac, mheart_H3K27ac = peaks_mheart$mheart_H3K27ac)
+tmp <- regionsToUpset(H3K27ac_list, nsets=length(H3K27ac_list))
+UpSet(make_comb_mat(tmp))
+```
+
+### H3K27me3
+```{r}
+H3K27me3_list <- list(mESC_H3K27me3 = peaks_mesc$mESC_H3K27me3, mheart_H3K27me3 = peaks_mheart$mheart_H3K27me3)
+tmp <- regionsToUpset(H3K27me3_list, nsets=length(H3K27me3_list))
+UpSet(make_comb_mat(tmp))
+```
+
+
+The UpSet plots show that regulatory elements are largely tissue-specific, with many peaks unique to either mESC or the differentiated heart tissue, and a smaller subset shared between both. This indicates that differentiation involves extensive changes in the regulatory landscape of a cell, where some stem cell specific elements are lost and new tissue specific elements are activated. However, the presence of a shared subset suggests that some core regulatory elements are still conserved across cell types. These elements are likely associated with fundamental cellular functions.
+
+## Remark:
+I could not get the warning signs to go away despite my best efforts. I am unsure why the issue might be arising.
