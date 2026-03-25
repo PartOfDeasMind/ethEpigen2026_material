@@ -1,0 +1,235 @@
+---
+title: "assignment"
+author: "Dea Karam"
+date: "2026-03-23"
+output: 
+  html_document:
+    theme: flatly
+    highlight: kate
+    number_sections: no
+    toc: yes
+    toc_depth: 5
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(SummarizedExperiment)
+  library(GenomicRanges)
+  library(edgeR)
+  library(ggplot2)
+  library(epiwraps)
+  library(pheatmap)
+})
+```
+
+## Downloading the Data
+
+As a first step, we download the data we will be using. The following downloaded file is a subset of a larger ATAC-seq peak-count dataset in the Hippocampus of mice upon stress. The file is already in `SummarizedExperiment` format.
+
+```{r}
+download.file("https://ethz-ins.org/content/mouse_mm38_hippocampus.peakCounts.SE.rds", "peak_counts.rds")
+```
+
+After downloading the data, we must read it in.
+
+```{r}
+se <- readRDS("peak_counts.rds")
+```
+
+## Exploring The Data
+
+Before we analyze the data, we should first explore the data that we have.
+
+```{r}
+print(rowRanges(se))
+
+num_ranges <- length(rowRanges(se))
+```
+
+The `rowRanges` of the `SummarizedExperiment` shows that the dataset contains `r num_ranges` genomic regions (peaks), each represented by its chromosome and genomic coordinates.
+
+```{r}
+print(colData(se))
+
+num_samples <- ncol(se)
+```
+
+Additionally, we can see that the `ncol` of the `SummarizedExperiment` indicates that the dataset contains 12 samples. Each sample corresponds to one ATAC-seq experiment and has associated metadata (depth).
+
+```{r}
+names_samples <- gsub("\\_G.*.bam$","",basename(row.names(colData(se))))
+
+colnames(se) <- gsub("\\.bam$","",basename(row.names(colData(se))))
+
+print(names_samples)
+```
+
+```{r}
+table(names_samples)
+```
+
+We can see that the dataset contains 3 samples for each of the 4 groups `r unique(names_samples)`.
+
+## Differential Analyses
+
+Now that we have explored the data, it is time to run two differential analyses.
+
+### Stressed vs Control
+
+We first explore whether the condition Stressed vs Control has any effect on the number of reads per peak.
+
+For that, we first need to classify the samples as either Control or Stressed only (irrespective of sex).
+
+```{r}
+se$condition <- ifelse(grepl("^FSS", names_samples), "stressed", "control")
+colData(se)
+```
+
+
+After having labeled the samples as control or stressed, we first assign each peak a unique name using its genomic coordinates (chromosome:start-end).
+
+Next, we extract the count matrix from the SummarizedExperiment and store it in an edgeR DGEList, while also specifying the sample groups (control vs stressed).
+
+We then apply TMM normalization to account for differences in library size across samples. This allows counts to be more comparable.
+
+After that, we estimate dispersion, which measures how much counts vary across biological replicates. This is important because edgeR models the counts with a negative binomial distribution.
+
+Finally, exactTest(dds) performs the differential analysis for each peak, and topTags(..., Inf) returns all peaks ranked by statistical significance.
+
+```{r}
+row.names(se) <- as.character(granges(se))
+# rowRanges((se))
+
+dds_condition <- DGEList(assay(se), group=se$condition)
+dds_condition <- calcNormFactors(dds_condition)
+dds_condition <- estimateDisp(dds_condition)
+
+et_condition <- as.data.frame(topTags(exactTest(dds_condition), Inf))
+ggplot(et_condition, aes(logFC, -log10(FDR))) + geom_point() +   labs(
+    title = "Volcano Plot: Condition Effect",
+    x = "logFC",
+    y = "-log10(FDR)"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+```
+
+The volcano plot suggests that stress has only a modest overall effect on chromatin accessibility. Most peaks have log-fold changes (logFC) close to zero and low significance, meaning that they do not differ much between stressed and control samples. Still, a small number of peaks appear more strongly different between the two groups.
+
+
+We now extract and plot the top 10 most significant regions to investigate the pattern of differences in read counts.
+
+
+```{r}
+top10_condition <- head(et_condition[order(et_condition$FDR), ], 10)
+```
+
+```{r}
+top10_ids <- rownames(top10_condition)
+```
+
+```{r}
+dge <- DGEList(counts = assay(se))
+dge <- calcNormFactors(dge)
+
+condition_order <- order(se$condition)
+
+logcpm_top10_cond <- cpm(dge, log = TRUE)[top10_ids, condition_order]
+
+
+# For grouping
+group_cond <- se$condition[condition_order]
+annotation_col_cond <- data.frame(Group = group_cond)
+rownames(annotation_col_cond) <- colnames(logcpm_top10_cond)
+gap_col_cond <- sum(group_cond == "control")
+```
+
+```{r,  fig.width= 7, fig.height=7}
+pheatmap(
+  logcpm_top10_cond,
+  scale = "row",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  annotation_col = annotation_col_cond,
+  gaps_col = gap_col_cond,
+  main = "Top 10 significant regions: Control vs Stressed"
+)
+```
+
+The heatmap shows that the top 10 most significant peaks differ somewhat between stressed and control samples, but, overall, the pattern is not very strong. Most samples have fairly similar values, and only a few regions show clearer shifts in read counts. This supports the volcano plot that changes are fairly modest.
+
+We can also see that the top 10 most differentially accessible peaks are found on chromosomes 1 and X.
+
+There also appears to be one outlier in the dataset (Control_female_GSM6041843) whose regions have much higher read count.
+
+### Female vs Male
+
+We then do the same analysis again, but comparing sex (Female vs Male) rather than condition.
+
+```{r}
+se$sex <- ifelse(grepl("female$", names_samples), "Female", "Male")
+colData(se)
+```
+
+```{r}
+dds_sex <- DGEList(assay(se), group=se$sex)
+dds_sex <- calcNormFactors(dds_sex)
+dds_sex <- estimateDisp(dds_sex)
+
+et_sex <- as.data.frame(topTags(exactTest(dds_sex), Inf))
+ggplot(et_sex, aes(logFC, -log10(FDR))) + geom_point() + labs(
+    title = "Volcano Plot: Sex Effect",
+    x = "logFC",
+    y = "-log10(FDR)"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Unlike the condition comparison, the sex comparison shows a strong signal. Many peaks are far from zero and have high significance, which means that chromatin accessibility differs much more between female and male samples than between stressed and control samples.
+
+```{r}
+top10_sex <- head(et_sex[order(et_sex$FDR), ], 10)
+top10_sex
+```
+
+```{r, fig.width= 7, fig.height=7}
+top10_ids_sex <- rownames(top10_sex)
+
+sex_order <- order(se$sex)
+logcpm_top10_sex <- cpm(dge, log = TRUE)[top10_ids_sex, sex_order]
+
+# For grouping
+group_sex <- se$sex[sex_order]
+annotation_col_sex <- data.frame(Group = group_sex)
+rownames(annotation_col_sex) <- colnames(logcpm_top10_sex)
+gap_col_sex <- sum(group_sex == "Female")
+
+
+pheatmap(
+  logcpm_top10_sex,
+  scale = "row",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  annotation_col = annotation_col_sex,
+  gaps_col = gap_col_sex,
+  main = "Top 10 significant regions: female vs male"
+)
+```
+
+
+The heatmap shows a clear difference between male and female samples. The top 10 peaks have opposite patterns in the two groups. This supports the volcano plot and shows that sex has a strong effect on chromatin accessibility in this dataset.
+
+Additionally, we can see that all 10 most significant regions are found om the X and Y chromosomes, indicating that the sex comparison is capturing genuine sex chromosome differences between male and female samples.
+
+
+## Conclusion
+
+As a final conclusion, the differential analyses showed that stress has only a limited effect on chromatin accessibility in this dataset. On the other hand, sex has a much stronger effect. This was clear both from the volcano plots and from the heatmaps of the top 10 most significant regions. The stressed and control samples showed only weak separation, whereas female and male samples displayed strong and consistent differences. Therefore, sex appears to be the main source of variation in chromatin accessibility in these hippocampus ATAC-seq samples.
