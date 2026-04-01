@@ -1,0 +1,145 @@
+---
+title: "assignment"
+author: "Dea Karam"
+date: "2026-04-01"
+output: 
+  html_document:
+    theme: flatly
+    highlight: kate
+    number_sections: no
+    toc: yes
+    toc_depth: 5
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Import required packages
+```{r}
+suppressPackageStartupMessages({
+    library(AnnotationHub)
+    library(ensembldb)  
+    library(GenomicRanges)
+    library(MotifDb)
+    library(motifmatchr)
+    library(TFBSTools)
+    library(universalmotif)
+    library(Biostrings) 
+})
+```
+
+## Download the data
+
+For this analysis, I chose the transcription factor REST, a transcriptional repressor best known for silencing neuronal genes in non-neuronal cells.
+
+The ChIP-seq experiment was performed on the human GM12878 cell line, a lymphoblastoid cell line, to identify genomic regions bound by REST.
+
+```{r}
+download.file("https://www.encodeproject.org/files/ENCFF428QEI/@@download/ENCFF428QEI.bed.gz", "hs_rest.bed.gz")
+peaks <- rtracklayer::import("hs_rest.bed.gz", format = "NarrowPeak")
+seqlevelsStyle(peaks) <- "Ensembl" 
+```
+## Downloading the genome
+
+```{r}
+ah <- AnnotationHub()
+ah_query <- AnnotationHub::query(ah, c("Homo sapiens", "GRCh38", "2bit", "dna_sm"))
+genome_id <- rev(ah_query$ah_id)[1]
+genome <- ah[[genome_id]]
+genome_seqs <- import(genome)
+```
+
+## Loading motifs 
+
+We query the MotifDb database to find motif sequences for REST.
+
+```{r}
+motifs <- query(MotifDb, c("REST"))
+names(motifs)
+```
+
+I chose one of the above motif sequences to proceed with the analysis.
+
+```{r}
+motif <- motifs[["Hsapiens-HOCOMOCOv10-REST_HUMAN.H10MO.A"]]
+```
+
+```{r, fig.width= 20, fig.height=5}
+view_motifs(motif)
+```
+
+We then convert the motif seuqnece into the appropriate format.
+
+```{r}
+motif2 <- convert_motifs(motif, class="TFBSTools-PWMatrix")
+```
+
+## Analysis
+
+### Question 1
+
+"Of all the peaks, what proportion contains a motif for the factor?"
+
+For that, we first run motifmatchr to find the motif instances that are within the REST peaks.
+
+```{r}
+moi_peaks <- motifmatchr::matchMotifs(motif2, subject=peaks, genome= genome_seqs, out="positions")[[1]]
+moi_peaks
+```
+
+
+```{r}
+print(table(overlapsAny(peaks, moi_peaks)))
+cat("The total number of peaks that the genome contains:", length(peaks))
+```
+
+```{r}
+num_peaks <- length(peaks)
+peak_has_motif <- overlapsAny(peaks, moi_peaks)
+motif_peak_overlaps <- sum(peak_has_motif)
+pct_overlaps <- (motif_peak_overlaps/num_peaks) * 100
+cat("Of the", num_peaks, "peaks,", motif_peak_overlaps, "(", round(pct_overlaps, 2), "%) contain a motif.\n")
+```
+### Question 2
+
+"Of all instances of that motif in the genome (or in one chromosome), what proportion is bound by the factor (i.e.
+has a peak)?"
+
+For this question, I only searched for motif instances within chromosome 1.
+
+```{r}
+chr_seq <- genome_seqs["1"]
+peaks_chr1 <- peaks[seqnames(peaks)=="1"]
+moi_chr <- motifmatchr::matchMotifs(motif2, subject=chr_seq, genome= genome_seqs, out="positions")
+moi_chr
+```
+
+In the following code chunk, I simply convert the resulting IRanges object to GRanges.
+
+```{r}
+moi_chr <- moi_chr[[1]][[1]]
+moi_chr_strand <- mcols(moi_chr)$strand
+
+
+moi_chr_gr <- GRanges(
+  seqnames = "1",
+  ranges = IRanges(start = start(moi_chr), end = end(moi_chr)),
+  strand = moi_chr_strand
+)
+
+```
+
+```{r}
+table(overlapsAny(moi_chr_gr, peaks_chr1, type ="within"))
+```
+
+```{r}
+num_motifs_chr <- length(moi_chr_gr)
+motif_in_peak <- overlapsAny(moi_chr_gr, peaks_chr1, type ="within")
+ov <- sum(motif_in_peak)
+pct_overlaps_chr <- (ov/num_motifs_chr) * 100
+cat("Of the", num_motifs_chr, "motif instances,", ov, "(", round(pct_overlaps_chr, 2), "%) overlap a peak\n")
+```
