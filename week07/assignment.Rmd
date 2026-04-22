@@ -1,0 +1,207 @@
+---
+title: "Assignment 7"
+author: "Dea Karam"
+date: "2026-04-19"
+output:
+  html_document:
+    theme: flatly
+    highlight: kate
+    number_sections: no
+    toc: yes
+    toc_depth: 5
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import required packages
+
+```{r}
+suppressPackageStartupMessages({
+  library(epiwraps)
+  library(AnnotationHub)
+  library(MotifDb)
+  library(motifmatchr)
+  library(universalmotif)
+  library(ensembldb)
+  library(GenomicRanges)
+  library(Rsamtools)
+  library(rtracklayer)
+  library(ggplot2)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  library(TFBSTools)
+  library(sechm)
+  library(limma)
+  library(betterChromVAR)
+  library(ggrepel)
+})
+```
+
+# Part 1: Insertion and nucleosome-center profiles around NRF1 motifs on chr19
+
+For this analysis, I chose NRF1 (Nuclear Respiratory Factor 1), a transcription factor that regulates nuclear-encoded mitochondrial genes through a short GC-rich palindromic motif and is active in essentially all tissues.
+
+## Download the data
+
+```{r, eval=FALSE}
+download.file("https://ethz-ins.org/content/w7/atac.chr19.bam", "atac.chr19.bam", mode="wb")
+download.file("https://ethz-ins.org/content/w7/atac.chr19.bam.bai", "atac.chr19.bam.bai", mode="wb")
+```
+
+## Preparing the tracks
+
+From the paired-end ATAC BAM I generate two bigwig tracks:
+
+1. **`NF_cuts.bw`**: the number of Tn5 insertion sites (cuts, i.e. fragment ends) at each position, using only nucleosome-free fragments (30–120 bp).
+2. **`mono_centers.bw`**: the centers of mono-nucleosome fragments (140–220 bp), which indicates where nucleosomes are positioned.
+
+
+```{r}
+bam <- "atac.chr19.bam"
+
+bam2bw(bam, output_bw = "NF_cuts.bw", paired=TRUE, binWidth=1L, type="ends",
+       minFragLength=30, maxFragLength=120, trim=4L, extend=3L,
+       forceSeqlevelsStyle = "Ensembl")
+bam2bw(bam, output_bw = "mono_centers.bw", paired = TRUE, binWidth = 5L, type = "center",
+       minFragLength = 140, maxFragLength = 220, trim = 4L, extend = 10L,
+       forceSeqlevelsStyle = "Ensembl")
+```
+
+## Getting high-confidence NRF1 motif occurrences on chr19
+
+I fetch the mouse NRF1 motif from `MotifDb`, convert it to a `TFBSTools` PFMatrix, and scan chr19 for matches using a stringent p-value cutoff (`1e-5`) so that the remaining hits are high-confidence.
+
+```{r}
+ah <- AnnotationHub()
+genome <- ah[["AH68356"]]
+chr19  <- import(genome)["19"]
+
+motif <- MotifDb::query(MotifDb, c("NRF1", "Mmusculus"))[[1]]
+motif2 <- convert_motifs(motif, class="TFBSTools-PFMatrix")
+```
+
+
+```{r, fig.width=18, fig.height=4}
+view_motifs(motif)
+```
+
+
+```{r}
+moi <- motifmatchr::matchMotifs(motif2, chr19, out="positions", p.cutoff=1e-5)[[1]]
+moi <- as(setNames(moi, names(chr19)), "GRanges")
+length(moi)
+```
+## Plotting the two signals around NRF1 motif occurrences
+
+I extract both signals in 300-bp windows around each motif match (5-bp bins) and plot them as an enriched heatmap side by side. Below the heatmap, I also overlay the aggregated profiles.
+
+```{r, fig.width=10, fig.height=7}
+tracks <- c(NF_cuts = "NF_cuts.bw", mono_centers = "mono_centers.bw")
+
+sm <- signal2Matrix(tracks, moi, w=5, extend=300)
+
+plotEnrichedHeatmaps(sm, trim=0.95, multiScale = TRUE, axis_name = "0")
+```
+
+```{r, fig.width=8, fig.height=4}
+d <- meltSignals(sm)
+ggplot(d, aes(position, mean, colour=sample)) +
+  geom_line(linewidth=1.2) +
+  labs(x = "Position relative to NRF1 motif center (bp)",
+       y = "Mean signal",
+       colour = "Track") +
+  theme_classic()
+```
+
+
+The NF_cuts profile shows a clear footprint: cut frequency drops at the motif center (position 0) and rises into two sharp flanking peaks at roughly ±40 bp, consistent with Tn5 being excluded by the bound NRF1 protein and cutting immediately on either side of it. The mono_centers profile mirrors this pattern, with broader humps around ±150–200 bp, although the flanking nucleosome positioning is noticeably less phased than what one typically sees at CTCF sites.
+
+
+# Part 2: Motifs changing in accessibility between males and females
+
+For this part of the assignment, I re-use the ATAC-seq dataset from week 5.
+
+## Downloading the Data
+
+```{r, eval=FALSE}
+download.file("https://ethz-ins.org/content/mouse_mm38_hippocampus.peakCounts.SE.rds", "peakCounts.rds", mode="wb")
+```
+
+```{r}
+se <- readRDS("peakCounts.rds")
+```
+
+I restrict to standard chromosomes, align the seqlevels style with the `BSgenome` object and add the GC bias (needed by betterChromVAR)
+```{r}
+se <- GenomeInfoDb::keepStandardChromosomes(se, pruning.mode = "coarse")
+seqlevelsStyle(se) <- "UCSC"
+se <- addGCBias(se, genome=BSgenome.Mmusculus.UCSC.mm10)
+```
+
+## Finding motif matches
+
+I use the non-redundant HOCOMOCOv13 collection from `MotifDb`.
+
+```{r}
+motifs <- query(MotifDb, "HOCOMOCOv13")
+motifs <- do.call(TFBSTools::PWMatrixList, convert_motifs(motifs, class="TFBSTools-PWMatrix"))
+names(motifs) <- make.unique(sapply(motifs, \(x) gsub("\\..+","",x@name)))
+matches <- motifmatchr::matchMotifs(motifs, se, genome = BSgenome.Mmusculus.UCSC.mm10)
+matches
+```
+
+## Motif deviations with betterChromVAR
+
+```{r}
+dev <- betterChromVAR(se, matches)
+colData(dev)
+```
+
+## Differential accessibility between males and females
+
+
+```{r}
+dev$condition <- ifelse(grepl("FSS", colnames(dev)), "Stressed", "Control")
+dev$sex <- ifelse(grepl("female", colnames(dev)), "Female", "Male")
+```
+
+
+```{r}
+colData(dev)
+```
+```{r}
+design <- model.matrix(~ condition + sex, data = as.data.frame(colData(dev)))
+fit    <- eBayes(lmFit(assay(dev, "z"), design))
+
+sex_coef <- grep("sex", colnames(design), value = TRUE)
+res <- as.data.frame(topTable(fit, coef = sex_coef, number = Inf))
+res$motif <- row.names(res)
+head(res, 15)
+```
+### Volcano plot
+
+```{r, fig.width=7, fig.height=5}
+ggplot(res, aes(logFC, -log10(adj.P.Val), label = motif)) +
+  geom_point(alpha=0.4) +
+  geom_text_repel(data = head(res, 15), size = 3, max.overlaps = Inf) +
+  labs(x = "log-fold change in z-score (sex effect)",
+       y = "-log10(adj. P-value)") +
+  theme_classic()
+```
+
+The volcano plot shows which motifs differ in accessibility between male and female samples. Almost all significant hits fall on the left side (negative logFC), meaning their target sites are more accessible in females than males, while the right side of the plot is largely empty, suggesting that male-biased accessibility is either absent or too subtle to detect here.
+
+### Heatmap of the top candidate motifs
+
+```{r, fig.width=8, fig.height=6}
+top_motifs <- head(row.names(res), 10)
+sechm(dev, top_motifs, gaps_at = "sex", assayName = "z")
+```
+
+
+
+The heatmap confirms the volcano plot results nicely. All top motifs show consistently high z-scores (yellow) in females and low z-scores (blue) in males, with the pattern holding across both stressed and control animals within each sex.
