@@ -1,0 +1,183 @@
+---
+title: "Assignment"
+author: "Dea Karam"
+date: "2026-04-29"
+output:
+  html_document:
+    theme: flatly
+    highlight: kate
+    number_sections: no
+    toc: yes
+    toc_depth: 5
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+---
+
+```{r setup,}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Loading Packages
+
+```{r, results="hide"}
+suppressPackageStartupMessages({
+  library(epiwraps)
+  library(ggplot2)
+  library(AnnotationHub)
+  library(ensembldb)
+  library(edgeR)
+  library(rtracklayer)
+  library(BiocParallel)
+  library(bsseq)   
+  library(DMRcate)
+  library(pheatmap)
+})
+```
+
+# Part 1
+
+We download the following zipped folder since we need the `hg19_chr1_genes.rds` and `ESC_astrocytes_BSseq.rds` files.
+
+```{r, eval=FALSE}
+options(timeout = 6000)
+download.file("https://ethz-ins.org/content/w11_practical.zip", "w11_practical.zip")
+unzip("w11_practical.zip")
+```
+We then load the BSseq object, filter low coverage CpGs and then smooth.
+
+```{r, eval=FALSE}
+bs <- readRDS("ESC_astrocytes_BSseq.rds")
+
+bs <- bs[rowSums(assay(bs,"Cov")>0)==ncol(bs),]
+
+bs <- BSmooth(bs, BPPARAM=MulticoreParam(4, progress=TRUE))
+saveRDS(bs, "bs_smoothed.rds")
+```
+
+
+
+We load the differentially methylated regions file generated in the practical session
+
+```{r}
+dmrRanges <- readRDS("dmr.rds")
+head(dmrRanges)
+```
+
+We then select for DMRs in chromosome 1 and then choose the top 5 DMRs.
+
+```{r}
+dmrChr1 <- dmrRanges[seqnames(dmrRanges) == "chr1"]
+dmrChr1 <- dmrChr1[order(abs(dmrChr1$meandiff), decreasing=TRUE)]
+top5 <- dmrChr1[1:5]
+
+top5
+```
+
+Since the genes that overlap those DMRs are already given to us, we just need to extract those directly.
+
+```{r}
+geneNames <- unlist(strsplit(top5$overlapping.genes, ", "))
+geneNames <- unique(geneNames[!is.na(geneNames)]) 
+
+geneNames
+```
+
+
+```{r}
+genes <- readRDS("hg19_chr1_genes.rds")
+
+genesInDMRs <- genes[genes$symbol %in% geneNames]
+genesInDMRs
+```
+
+We can see that `genesInDMRs` contains only 2 of the 4 genes in `geneNames`. This is most probably because the two other genes (*CD46P1* and *RP11-115D7.3*) are a pseudogene and a lncRNA respectively, and the genes file was filtered to protein-coding genes only.
+
+Nevertheless, I only proceed with the two protein-coding genes found in `genesInDMRs`.
+
+We then extract the methylation per gene per sample and plot a heatmap of the result.
+
+
+```{r}
+bs <- readRDS("bs_smoothed.rds")
+
+metGenes <- bsseq::getMeth(bs, regions=genesInDMRs, what="perRegion")
+
+rownames(metGenes) <- genesInDMRs$symbol
+
+pheatmap(metGenes, name="methylation")
+```
+
+## Part 2
+
+Download the differential accessibility file and load it.
+
+```{r, eval=FALSE}
+options(timeout = 6000)
+download.file("https://www.ethz-ins.org/content/ATAC_AstroVsESC_subset.rds", "diff_acc.rds")
+```
+
+```{r}
+diff_acc <- readRDS("diff_acc.rds")
+```
+
+Our task is compare changes in DNA methylation with changes in chromatin accessibility during the ESC to astrocyte transition.
+We first filter both datasets to retain only statistically significant results (HMFDR < 0.05 for DMRs and FDR < 0.05 for differential ATAC-seq peaks).
+
+```{r}
+dmrRanges_sig <- dmrRanges[dmrRanges$HMFDR < 0.05]
+diff_access_sig <- diff_acc[diff_acc$FDR < 0.05]
+```
+
+
+We then use findOverlaps() to identify pairs of DMRs and ATAC peaks that overlap the same genomic coordinates. 
+
+```{r}
+hits <- findOverlaps(dmrRanges_sig, diff_access_sig)
+length(hits)
+```
+
+For each overlapping pair, we extract the mean methylation difference (meandiff, representing the change in methylation between astrocytes and ESC) and the log2 fold change in chromatin accessibility (logFC).
+
+```{r}
+combined <- data.frame(
+  meandiff = dmrRanges_sig$meandiff[queryHits(hits)],
+  logFC_ATAC = diff_access_sig$logFC[subjectHits(hits)]
+)
+
+head(combined)
+```
+
+We then plot the paired values against each other in a scatter plot and show a linear regression line in red.
+
+```{r}
+ggplot(combined, aes(x=meandiff, y=logFC_ATAC)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method="lm", colour="red") +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_vline(xintercept=0, linetype="dashed") +
+  labs(
+    x="Mean methylation difference (Astro - ESC)",
+    y="ATAC log2 FC (Astro vs ESC)",
+    title="Methylation vs Accessibility changes\nESC to Astrocyte"
+  ) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Lastly, we use the pearson correlation test to quantify the strength and significance of the relationship.
+
+```{r}
+cor_result <- cor.test(combined$meandiff, combined$logFC_ATAC, 
+                       method="pearson")
+cor_result
+```
+The scatter plot reveals a negative trend between methylation change and accessibility change across the 4143 overlapping regions.
+We can see that regions on the left (losing methylation in astrocytes) tend to gain accessibility as more points lie above the 0 log2FC line.
+We can also see that regions on the right (gaining methylation in astrocytes) tend to lose accessibility (more points lie below the 0 log2FC line). This trend is shown by the linear regression line with a negative slope drawn in the scatter plot.
+
+This inverse relationship is also confirmed by the Pearson correlation test, which yielded r = −0.22 (p < 2.2e-16), indicating a modest but highly significant negative correlation. 
+
+As the correlation is not strong, it reflects the fact that chromatin accessibility is regulated by multiple mechanisms beyond DNA methylation alone, including histone modifications and transcription factor binding as discussed in the lecture.
+
+Overall, these results suggest that DNA methylation and chromatin accessibility changes are partially coordinated during cell fate commitment, and that methylation acts as one of the stable repressive mechanisms that closes regulatory elements as ESCs differentiate into astrocytes.
